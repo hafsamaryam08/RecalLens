@@ -10,6 +10,16 @@ import uuid
 
 st.set_page_config(page_title="RecalLens", page_icon="🔍", layout="wide")
 
+# -- CUSTOM CSS TO REDUCE PADDING --
+st.markdown("""
+    <style>
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 # -- CONSTANTS & INIT --
 DEMO_EMAIL = "demo@recallens.app"
 DEMO_PASS = "Demo1234"
@@ -51,7 +61,14 @@ if "pdf_summary" not in st.session_state:
     st.session_state.pdf_summary = ""
 
 if "users" not in st.session_state:
-    st.session_state.users = {DEMO_EMAIL: DEMO_PASS}
+    if os.path.exists("users.json"):
+        with open("users.json", "r") as f:
+            st.session_state.users = json.load(f)
+    else:
+        st.session_state.users = {DEMO_EMAIL: DEMO_PASS}
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 # -- AUTH --
 if not st.session_state.authenticated:
@@ -91,6 +108,8 @@ if not st.session_state.authenticated:
                         st.error("Passwords do not match.")
                     else:
                         st.session_state.users[new_email] = new_password
+                        with open("users.json", "w") as f:
+                            json.dump(st.session_state.users, f)
                         st.success("Account created successfully! Please switch to the Sign In tab.")
     st.stop()
 
@@ -297,31 +316,49 @@ if page == "Upload & Ask":
             st.info(f"**Document Summary:**\n{st.session_state.pdf_summary}")
             
         st.write("---")
-        question = st.text_input("Ask a question about your notes:")
-        if st.button("Ask"):
-            if question:
-                with st.spinner("Searching..."):
-                    q_emb = st.session_state.embedder.encode([question]).tolist()
-                    results = st.session_state.collection.query(
-                        query_embeddings=q_emb,
-                        n_results=4
-                    )
-                    
-                    if results['documents'] and len(results['documents'][0]) > 0:
-                        context_str = ""
-                        for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
-                            context_str += f"[Page {meta['page']}]: {doc}\n\n"
-                        
-                        answer = query_llm(context_str, question)
-                        if answer:
-                            st.write("### Answer")
-                            st.write(answer)
+        
+        for chat in st.session_state.chat_history:
+            with st.chat_message("user"):
+                st.write(chat["q"])
+            with st.chat_message("assistant"):
+                st.write(chat["a"])
+                if chat.get("sources"):
+                    with st.expander("Sources Context"):
+                        for doc, meta in zip(chat["sources"]["docs"], chat["sources"]["metas"]):
+                            st.write(f"**Page {meta['page']}**: {doc}")
                             
+        question = st.chat_input("Ask a question about your notes...")
+        if question:
+            with st.chat_message("user"):
+                st.write(question)
+                
+            with st.spinner("Searching..."):
+                q_emb = st.session_state.embedder.encode([question]).tolist()
+                results = st.session_state.collection.query(
+                    query_embeddings=q_emb,
+                    n_results=4
+                )
+                
+                if results['documents'] and len(results['documents'][0]) > 0:
+                    context_str = ""
+                    for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+                        context_str += f"[Page {meta['page']}]: {doc}\n\n"
+                    
+                    answer = query_llm(context_str, question)
+                    if answer:
+                        with st.chat_message("assistant"):
+                            st.write(answer)
                             with st.expander("Sources Context"):
                                 for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
                                     st.write(f"**Page {meta['page']}**: {doc}")
-                    else:
-                        st.write("No relevant context found.")
+                                    
+                        st.session_state.chat_history.append({
+                            "q": question, 
+                            "a": answer, 
+                            "sources": {"docs": results['documents'][0], "metas": results['metadatas'][0]}
+                        })
+                else:
+                    st.write("No relevant context found.")
 
 elif page == "Flashcards":
     st.header("Flashcard Review")
@@ -345,6 +382,22 @@ elif page == "Flashcards":
                     st.success(f"Generated {len(new_cards)} flashcards!")
     else:
         st.info("Please process a PDF in 'Upload & Ask' first to generate flashcards.")
+        
+    if st.session_state.flashcards:
+        import csv
+        import io
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['Question', 'Answer'])
+        for c in st.session_state.flashcards:
+            writer.writerow([c['q'], c['a']])
+            
+        st.download_button(
+            label="📥 Download Flashcards (CSV)",
+            data=output.getvalue(),
+            file_name="recallens_flashcards.csv",
+            mime="text/csv"
+        )
         
     now = datetime.datetime.now().timestamp()
     due_cards = [c for c in st.session_state.flashcards if c['due'] <= now]
